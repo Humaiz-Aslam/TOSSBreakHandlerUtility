@@ -1,0 +1,16 @@
+{
+  "type": "trino",
+  "host": "3.221.185.123",
+  "port": 8443,
+  "authentication": {
+    "username": "syed.hamza",
+    "password": "Prometheus-X!"
+  },
+  "query": {
+    "date": "2025-11-21"
+  },
+  "verify_ssl": false,
+  "InputCSV" : "C:\\Users\\MuhammadHumaiz.Aslam\\Downloads\\VCTS TOSS\\VCTS TOSS\\93012_VCTS_20251121_TSS_OrderEvents_100001.csv\\93012_VCTS_20251121_TSS_OrderEvents_100001.csv",
+  "Ordermapcsv" : "C:\\Users\\MuhammadHumaiz.Aslam\\Downloads\\VCTS TOSS\\VCTS TOSS\\20251121_ordermap.csv"
+}
+ 

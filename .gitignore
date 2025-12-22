@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+dist/
+*.zip
+*.rar
+*.exe
+*.pkg
+*.toc
+*.spec
+
+# Logs / outputs
+*.log
+output.csv
