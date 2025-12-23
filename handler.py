@@ -10,7 +10,8 @@ import math
 import warnings
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.simplefilter(action='ignore', category=pd.errors.ParserWarning)
@@ -77,13 +78,10 @@ def load_ordermap(path, logger):
 # ---------------- TRINO CONNECTION ---------------- #
 def create_trino_connection(settings, logger):
     auth_cfg = settings.get("authentication", {})
-
-    logger.info(f"Attempting Trino connection | Host: {settings.get('host')} | Port: {settings.get('port')} | User: {auth_cfg.get('username')}")
-
     try:
-        conn = trino.dbapi.connect(
+        return trino.dbapi.connect(
             host=settings.get("host"),
-            port=int(settings.get("port", 443)),
+            port=int(settings.get("port")),
             user=auth_cfg.get("username"),
             auth=trino.auth.BasicAuthentication(
                 auth_cfg.get("username"),
@@ -92,8 +90,6 @@ def create_trino_connection(settings, logger):
             http_scheme="https",
             verify=settings.get("verify_ssl", True)
         )
-        logger.info(f"Trino connection SUCCESSFUL | Host: {settings.get('host')} | Port: {settings.get('port')} | User: {auth_cfg.get('username')}")
-        return conn
     except Exception as e:
         logger.error("Trino connection FAILED")
         logger.error(str(e))
@@ -117,6 +113,7 @@ def process_meor(settings, df, date_str, logger, chunk_size=10000):
         chunk_no = i // chunk_size + 1
         chunk = ids[i:i + chunk_size]
         logger.info(f"Processing MEOR Chunk {chunk_no}/{total_chunks} | Size: {len(chunk)}")
+
         q_ids = ",".join(f"'{x}'" for x in chunk)
 
         query = f"""
@@ -127,11 +124,17 @@ def process_meor(settings, df, date_str, logger, chunk_size=10000):
           AND msgtype = 'D'
         """
 
-        start = time.time()
-        cur = conn.cursor()
-        cur.execute(query)
-        rows = cur.fetchall()
-        elapsed = round(time.time() - start, 2)
+        try:
+            start = time.time()
+            cur = conn.cursor()
+            cur.execute(query)
+            rows = cur.fetchall()
+            elapsed = round(time.time() - start, 2)
+        except Exception as e:
+            logger.error(f"MEOR Trino failure on Chunk {chunk_no}")
+            logger.error(str(e))
+            sys.exit(1)
+
         logger.info(f"MEOR Chunk {chunk_no} fetched {len(rows)} rows in {elapsed}s")
 
         for r in rows:
@@ -141,13 +144,12 @@ def process_meor(settings, df, date_str, logger, chunk_size=10000):
     for idx, row in df.loc[mask].iterrows():
         old_val = row[16]
         if old_val in fetched:
-            new_val = fetched[old_val]
             df.at[idx, "OLD_VALUE_COL17"] = old_val
-            df.at[idx, 16] = new_val
+            df.at[idx, 16] = fetched[old_val]
             df.at[idx, "UPDATED"] = "YES"
             updated_count += 1
             logger.info(
-                f"MEOR UPDATED | Row {idx} | Column17: {old_val} -> {new_val}"
+                f"MEOR UPDATED | Row {idx} | Column17: {old_val} -> {fetched[old_val]}"
             )
 
     logger.info(f"MEOR processing COMPLETED | Total Rows Updated: {updated_count}")
@@ -170,6 +172,7 @@ def process_memr(settings, df, date_str, logger, chunk_size=10000):
         chunk_no = i // chunk_size + 1
         chunk = ids[i:i + chunk_size]
         logger.info(f"Processing MEMR Chunk {chunk_no}/{total_chunks} | Size: {len(chunk)}")
+
         q_ids = ",".join(f"'{x}'" for x in chunk)
 
         query = f"""
@@ -180,11 +183,17 @@ def process_memr(settings, df, date_str, logger, chunk_size=10000):
           AND msgtype = 'G'
         """
 
-        start = time.time()
-        cur = conn.cursor()
-        cur.execute(query)
-        rows = cur.fetchall()
-        elapsed = round(time.time() - start, 2)
+        try:
+            start = time.time()
+            cur = conn.cursor()
+            cur.execute(query)
+            rows = cur.fetchall()
+            elapsed = round(time.time() - start, 2)
+        except Exception as e:
+            logger.error(f"MEMR Trino failure on Chunk {chunk_no}")
+            logger.error(str(e))
+            sys.exit(1)
+
         logger.info(f"MEMR Chunk {chunk_no} fetched {len(rows)} rows in {elapsed}s")
 
         for r in rows:
@@ -207,31 +216,25 @@ def process_memr(settings, df, date_str, logger, chunk_size=10000):
     logger.info(f"MEMR processing COMPLETED | Total Rows Updated: {updated_count}")
 
 
-# ---------------- MARKET SESSION POST PROCESS ---------------- #
+# ---------------- MARKET SESSION (UPDATED ONLY) ---------------- #
 def apply_market_session(df, order_map, logger):
     logger.info("===== MARKET SESSION UPDATE STARTED =====")
 
-    updated_count = 0
     for idx, row in df.iterrows():
-        msg_type = row[3]
+        if row.get("UPDATED") != "YES":
+            continue
 
-        if msg_type == "MEOR":
+        if row[3] == "MEOR":
             order_id = row[17]
-            col_num = 18
-        elif msg_type == "MEMR":
+        elif row[3] == "MEMR":
             order_id = row[16]
-            col_num = 18
         else:
             continue
 
         if order_id in order_map:
-            df.at[idx, col_num] = order_map[order_id]
-            updated_count += 1
-            logger.info(
-                f"MARKETSESSION UPDATED | Row {idx} | Column{col_num}: {order_id} -> {order_map[order_id]}"
-            )
+            df.at[idx, 18] = order_map[order_id]
 
-    logger.info(f"MARKET SESSION UPDATE COMPLETED | Total Rows Updated: {updated_count}")
+    logger.info("===== MARKET SESSION UPDATE COMPLETED =====")
 
 
 # ---------------- MAIN ---------------- #
@@ -249,27 +252,42 @@ if __name__ == "__main__":
     log_file = os.path.join(os.path.dirname(input_csv), "toss_break_handler.log")
     logger = setup_logger(log_file)
 
-    df = pd.read_csv(
-        input_csv,
-        header=None,
-        dtype=str,
-        engine="python",
-        on_bad_lines="warn"
-    )
+    # Check if the date in config is current
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    is_current_date = date_str == today_str
+    if is_current_date:
+        logger.info(f"Date from config is CURRENT DATE: {date_str}")
+    else:
+        logger.info(f"Date from config is NOT CURRENT DATE: {date_str}")
 
-    df["UPDATED"] = "NO"
-    df["OLD_VALUE_COL17"] = ""
+    with open(input_csv, "r", encoding="utf-8") as f:
+        rows = [line.strip().split(",") for line in f.readlines()]
 
-    order_map = load_ordermap(ordermap_csv, logger)
+    max_cols = max(len(r) for r in rows)
+    rows = [r + [""] * (max_cols - len(r)) for r in rows]
+    df = pd.DataFrame(rows, dtype=str)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        executor.submit(process_meor, settings, df, date_str, logger)
-        executor.submit(process_memr, settings, df, date_str, logger)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_memr = executor.submit(process_memr, settings, df, date_str, logger)
+        f_meor = executor.submit(process_meor, settings, df, date_str, logger)
+        f_ordermap = executor.submit(load_ordermap, ordermap_csv, logger)
+
+        # Wait for MEMR & MEOR to finish, stop on any exception
+        for f in as_completed([f_memr, f_meor]):
+            try:
+                f.result()
+            except Exception:
+                sys.exit(1)
+
+        order_map = f_ordermap.result()
 
     apply_market_session(df, order_map, logger)
+
+    # If date is NOT current, only keep MEMR and MEOR rows
+    if not is_current_date:
+        df = df[df[3].isin(["MEMR", "MEOR"])]
 
     output_csv = os.path.join(os.path.dirname(input_csv), "updated_csv.csv")
     df.to_csv(output_csv, index=False, header=False)
 
-    logger.info(f"Updated CSV saved at: {output_csv}")
     logger.info("===== TOSS Break Handler COMPLETED =====")
